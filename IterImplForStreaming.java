@@ -60,11 +60,29 @@ class IterImplForStreaming {
 		}
 	}
 	
+	/**
+	 * 
+	 * @param iter
+	 * @param i
+	 * @param result
+	 * @return
+	 * @throws IOException
+	 */
 	private static int ifSupport(JsonIterator iter, int i, long result) throws IOException {
 		if (nextToken(iter) != ':') {
 			throw iter.reportError("readObjectFieldAsHash", "expect :");
 		}
-		return (int) result;
+		return longToInt(result);
+	}
+	
+	/**
+	 * 
+	 * @param l
+	 * @return
+	 */
+	private static int longToInt(long l) {
+		Long intero = l;
+		return intero.intValue(); 
 	}
 
 	/**
@@ -243,17 +261,7 @@ class IterImplForStreaming {
 	}
 
 	// read the bytes between " "
-	final static Slice readSlice(JsonIterator iter) throws IOException {
-		if (IterImpl.nextToken(iter) != '"') {
-			throw iter.reportError("readSlice", "expect \" for string");
-		}
-		int end = IterImplString.findSliceEnd(iter);
-		if (end != -1) {
-			// reuse current buffer
-			iter.reusableSlice.reset(iter.buf, iter.head, end - 1);
-			iter.head = end;
-			return iter.reusableSlice;
-		}
+	final static Slice readSliceSupp(JsonIterator iter, int end) throws IOException {
 		byte[] part1 = new byte[iter.tail - iter.head];
 		System.arraycopy(iter.buf, iter.head, part1, 0, part1.length);
 		byte[] part2 = null;
@@ -278,6 +286,21 @@ class IterImplForStreaming {
 		}
 	}
 
+	// read the bytes between " "
+	final static Slice readSlice(JsonIterator iter) throws IOException {
+		if (IterImpl.nextToken(iter) != '"') {
+			throw iter.reportError("readSlice", "expect \" for string");
+		}
+		int end = IterImplString.findSliceEnd(iter);
+		if (end != -1) {
+			// reuse current buffer
+			iter.reusableSlice.reset(iter.buf, iter.head, end - 1);
+			iter.head = end;
+			return iter.reusableSlice;
+		}
+
+		return readSliceSupp(iter, end);
+	}
 	final static byte nextToken(JsonIterator iter) throws IOException {
 		for (;;) {
 			for (int i = iter.head; i < iter.tail; i++) {
@@ -360,48 +383,74 @@ class IterImplForStreaming {
 		return iter.buf[iter.head++];
 	}
 
+	private static Any readAnySuppT(JsonIterator iter, int n1) throws IOException {
+		skipFixedBytes(iter, n1);
+		iter.skipStartedAt = -1;
+		return Any.wrap(true);
+	}
+
+	private static Any readAnySuppF(JsonIterator iter, int n2) throws IOException {
+		skipFixedBytes(iter, n2);
+		iter.skipStartedAt = -1;
+		return Any.wrap(false);
+	}
+	
+	private static Any readAnySuppN(JsonIterator iter, int n1) throws IOException {
+		skipFixedBytes(iter, n1);
+		iter.skipStartedAt = -1;
+		return Any.wrap(0);
+	}
+	
+	private static Any readAnySuppDefault(JsonIterator iter, byte[] copied) throws IOException{
+		if (skipNumber(iter)) {
+			copied = copySkippedBytes(iter);
+			return Any.lazyDouble(copied, 0, copied.length);
+		} else {
+			copied = copySkippedBytes(iter);
+			return Any.lazyLong(copied, 0, copied.length);
+		}
+	}
+	
+	private static Any readAnySuppQuadra(JsonIterator iter, byte[] copied) throws IOException{
+		skipArray(iter);
+		copied = copySkippedBytes(iter);
+		return Any.lazyArray(copied, 0, copied.length);
+	}
+	
+	private static Any readAnySuppGraffa(JsonIterator iter, byte[] copied) throws IOException{
+		skipObject(iter);
+		copied = copySkippedBytes(iter);
+		return Any.lazyObject(copied, 0, copied.length);
+	}
+
 	public static Any readAny(JsonIterator iter) throws IOException {
 		iter.skipStartedAt = iter.head;
 		byte c = nextToken(iter);
 		int n1 = 3;
 		int n2 = 4;
+		byte[] copied = null;
 		switch (c) {
 		case '"':
 			skipString(iter);
-			byte[] copied = copySkippedBytes(iter);
+			copied = copySkippedBytes(iter);
 			return Any.lazyString(copied, 0, copied.length);
 		case 't':
-
-			skipFixedBytes(iter, n1);
-			iter.skipStartedAt = -1;
-			return Any.wrap(true);
+			return readAnySuppT(iter, n1);
 		case 'f':
-			skipFixedBytes(iter, n2);
-			iter.skipStartedAt = -1;
-			return Any.wrap(false);
+			return readAnySuppF(iter, n2);
 		case 'n':
-			skipFixedBytes(iter, n1);
-			iter.skipStartedAt = -1;
-			return Any.wrap(0);
+			return readAnySuppN(iter, n1);
 		case '[':
-			skipArray(iter);
-			copied = copySkippedBytes(iter);
-			return Any.lazyArray(copied, 0, copied.length);
+			return readAnySuppQuadra(iter, copied);
 		case '{':
-			skipObject(iter);
-			copied = copySkippedBytes(iter);
-			return Any.lazyObject(copied, 0, copied.length);
+			return readAnySuppGraffa(iter, copied);
 		default:
-			if (skipNumber(iter)) {
-				copied = copySkippedBytes(iter);
-				return Any.lazyDouble(copied, 0, copied.length);
-			} else {
-				copied = copySkippedBytes(iter);
-				return Any.lazyLong(copied, 0, copied.length);
-			}
+			return readAnySuppDefault(iter, copied);
 		}
 	}
 
+	
+	
 	private static byte[] copySkippedBytes(JsonIterator iter) {
 		int start = iter.skipStartedAt;
 		iter.skipStartedAt = -1;
@@ -447,35 +496,10 @@ class IterImplForStreaming {
 			if (bc == '\\') {
 				bc = readByte(iter);
 				bc = switchSupport(bc, iter, isExpectingLowSurrogate);
-			} else if ((Integer
-					.getInteger(Long
-							.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), f, '&')))
-					.intValue()) != 0) {
+			} else if ((Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), f, '&'))).intValue()) != 0) {
 				final int u2 = readByte(iter);
 				f = 0xE0;
-				if ((Integer
-						.getInteger(Long.toString(
-								SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), f, '&')))
-						.intValue()) == 0xC0) {
-					long l1 = 0x1F;
-					long l2 = 0x3F;
-					bc = ((Integer
-							.getInteger(Long.toString(
-									SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), l1, '&')))
-							.intValue()) << 6)
-							+ (Integer
-									.getInteger(Long.toString(SupportBitwise
-											.bitwise(Long.valueOf(Integer.toString(u2)).longValue(), l2, '&')))
-									.intValue());
-				} else {
-					final int u3 = readByte(iter);
-					f = 0xF0;
-					support = iterImplStreamingSupport(iter, f, bc, u2, u3, j);
-					for (JsonIterator je: support.keySet()){
-						iter = je;
-					}
-					bc = support.get(iter);
-				}
+				bc = readStringSlowPath(iter, bc, u2, f, support, j);
 			}
 			if (iter.reusableChars.length == j) {
 				newBuf = new char[iter.reusableChars.length * 2];
@@ -486,8 +510,68 @@ class IterImplForStreaming {
 		}
 	}
 	
-	private static int switchSupport(int bc, JsonIterator iter, Boolean isExpectingLowSurrogate) throws IOException {
-		
+	/**
+	 * 
+	 * @param iter
+	 * @param bc
+	 * @param u2
+	 * @param f
+	 * @param support
+	 * @param j
+	 * @return
+	 * @throws IOException
+	 */
+	private static int readStringSlowPath(JsonIterator iter, int bc, int u2, long f, Map<JsonIterator, Integer> support, int j) throws IOException {
+		int bcCopy = bc;
+		Map<JsonIterator, Integer> suppCopy = support;
+		if ((Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), f, '&'))).intValue()) == 0xC0) {
+			bc = readStringSlowPath(bcCopy, u2);
+		} else {
+			final int u3 = readByte(iter);
+			f = 0xF0;
+			suppCopy = iterImplStreamingSupport(iter, f, bcCopy, u2, u3, j);
+			bcCopy = readStringSlowPath(iter, bcCopy, support);
+		}
+		return bcCopy;
+	}
+	
+	/**
+	 * 
+	 * @param bc
+	 * @param u2
+	 * @return
+	 */
+	private static int readStringSlowPath(int bc, int u2) {
+		long l1 = 0x1F;
+		long l2 = 0x3F;
+		return ((Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), l1, '&'))).intValue()) << 6) + (Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(u2)).longValue(), l2, '&'))).intValue());
+	}
+	
+	/**
+	 * 
+	 * @param iter
+	 * @param bc
+	 * @param support
+	 * @return
+	 */
+	private static int readStringSlowPath(JsonIterator iter, int bc, Map<JsonIterator, Integer> support) {
+		JsonIterator j = iter;
+		for (JsonIterator je: support.keySet()){
+			j = je;
+		}
+		iter = j;
+		return support.get(iter);
+	}
+	
+	/**
+	 * 
+	 * @param bc
+	 * @param iter
+	 * @param isExpectingLowSurrogate
+	 * @return
+	 * @throws IOException
+	 */
+	private static int switchSupport(int bc, JsonIterator iter, Boolean isExpectingLowSurrogate) throws IOException {	
 		int bcCopy = bc;
 		boolean booleSupport = isExpectingLowSurrogate;
 		int[] valori = {'b','t', 'n', 'f','r','"','\\', '/'};
@@ -525,59 +609,53 @@ class IterImplForStreaming {
 	
 	private static Map<JsonIterator, Integer> iterImplStreamingSupport(JsonIterator iter, long f, int bc, int u2, int u3, int j) throws IOException{
 		Map<JsonIterator, Integer> support = new TreeMap<JsonIterator, Integer>();
-		if ((Integer
-				.getInteger(Long.toString(
-						SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), f, '&')))
-				.intValue()) == 0xE0) {
+		if ((Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), f, '&'))).intValue()) == 0xE0) {
 			long l1 = 0x0F;
 			long l2 = 0x3F;
-			bc = ((Integer
-					.getInteger(Long.toString(SupportBitwise
-							.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), l1, '&')))
-					.intValue()) << 12)
-					+ ((Integer
-							.getInteger(Long.toString(SupportBitwise
-									.bitwise(Long.valueOf(Integer.toString(u2)).longValue(), l2, '&')))
-							.intValue()) << 6)
-					+ (Integer
-							.getInteger(Long.toString(SupportBitwise
-									.bitwise(Long.valueOf(Integer.toString(u3)).longValue(), l2, '&')))
-							.intValue());
+			bc = ((Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(bc)).longValue(), l1, '&'))).intValue()) << 12) + ((Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(u2)).longValue(), l2, '&'))).intValue()) << 6) + (Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(u3)).longValue(), l2, '&'))).intValue());
 			support.put(iter, bc);
 			return support;
 		} else {
 			bc = iterStreamingSupport(iter, f, bc, u2, u3);
-
 			if (bc >= 0x10000) {
 				// check if valid unicode
-				if (bc >= 0x110000) {
-					throw iter.reportError("readStringSlowPath", "invalid unicode character");
-				}
-
+				iterImplStreamingSupportErr(iter, bc);
 				// split surrogates
 				final int sup = bc - 0x10000;
-				if (iter.reusableChars.length == j) {
-					char[] newBuf = new char[iter.reusableChars.length * 2];
-					System.arraycopy(iter.reusableChars, 0, newBuf, 0, iter.reusableChars.length);
-					iter.reusableChars = newBuf;
-				}
+				iterImplStreamingSupport(iter, j);
 				Integer a = ((sup >>> 10) + 0xd800);
 				iter.reusableChars[j++] = a.toString().toCharArray()[0];
-				if (iter.reusableChars.length == j) {
-					char[] newBuf = new char[iter.reusableChars.length * 2];
-					System.arraycopy(iter.reusableChars, 0, newBuf, 0, iter.reusableChars.length);
-					iter.reusableChars = newBuf;
-				}
+				iterImplStreamingSupport(iter, j);
 				f = 0x3ff;
-				Integer b = (Integer
-						.getInteger(Long.toString(SupportBitwise
-								.bitwise(Long.valueOf(Integer.toString(sup)).longValue(), f, '&')))
-						.intValue() + 0xdc00);
-
+				Integer b = (Integer.getInteger(Long.toString(SupportBitwise.bitwise(Long.valueOf(Integer.toString(sup)).longValue(), f, '&'))).intValue() + 0xdc00);
 				iter.reusableChars[j++] = b.toString().toCharArray()[0];
 			}
 			support.put(iter, bc);
 			return support;
+		}
+	}
+	
+	/**
+	 * 
+	 * @param iter
+	 * @param bc
+	 */
+	private static void iterImplStreamingSupportErr(JsonIterator iter, int bc) {
+		if (bc >= 0x110000) {
+			throw iter.reportError("readStringSlowPath", "invalid unicode character");
+		}
+	}
+
+	/**
+	 * 
+	 * @param iter
+	 * @param j
+	 */
+	private static void iterImplStreamingSupport(JsonIterator iter, int j) {
+		if (iter.reusableChars.length == j) {
+			char[] newBuf = new char[iter.reusableChars.length * 2];
+			System.arraycopy(iter.reusableChars, 0, newBuf, 0, iter.reusableChars.length);
+			iter.reusableChars = newBuf;
 		}
 	}
 
@@ -682,7 +760,6 @@ class IterImplForStreaming {
 
 	public static final String readNumber(final JsonIterator iter) throws IOException {
 		int j = 0;
-
 		String stringa = null;
 		char[] newBuf = null;
 		for (;;) {
@@ -701,7 +778,6 @@ class IterImplForStreaming {
 					return stringa;
 				}
 			}
-			
 			if (!IterImpl.loadMore(iter)) {
 				iter.head = iter.tail;
 				stringa = new String(iter.reusableChars, 0, j);
