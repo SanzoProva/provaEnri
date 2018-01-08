@@ -39,10 +39,10 @@ class IterImplForStreaming {
 	
 	private static int forSupport(long hash, JsonIterator iter) throws IOException {
 		long result = hash;
-		for (;;) {
+		while (true) {
 			byte c = 0;
-			int i = iter.head;
-			for (; i < iter.tail; i++) {
+			int i = 0;
+			for (i = iter.head; i < iter.tail; i++) {
 				c = iter.buf[i];
 				if (c == '"') {
 					break;
@@ -574,12 +574,9 @@ class IterImplForStreaming {
 	private static int switchSupport(int bc, JsonIterator iter, Boolean isExpectingLowSurrogate) throws IOException {	
 		int bcCopy = bc;
 		boolean booleSupport = isExpectingLowSurrogate;
-		int[] valori = {'b','t', 'n', 'f','r','"','\\', '/'};
-		int[] risultati = {'\b','\t','\n','\f','\r','"','\\','/'};
 		boolean valid = false;
 		if(bcCopy=='u') {
-			bcCopy = (IterImplString.translateHex(readByte(iter)) << 12) + (IterImplString.translateHex(readByte(iter)) << 8)
-			    + (IterImplString.translateHex(readByte(iter)) << 4) + IterImplString.translateHex(readByte(iter));
+			bcCopy = (IterImplString.translateHex(readByte(iter)) << 12) + (IterImplString.translateHex(readByte(iter)) << 8) + (IterImplString.translateHex(readByte(iter)) << 4) + IterImplString.translateHex(readByte(iter));
 			char charBc = (char) bcCopy;
 			boolean b1 = Boolean.logicalAnd(isExpectingLowSurrogate, Character.isHighSurrogate(charBc));
 			boolean b2 = Boolean.logicalAnd(!isExpectingLowSurrogate, Character.isLowSurrogate(charBc));
@@ -595,16 +592,34 @@ class IterImplForStreaming {
 			valid = true;
 			isExpectingLowSurrogate = booleSupport;
 		}
-		for(int i=0; i<valori.length;i++) {
-			if(bcCopy == valori[i]){
-				bcCopy = risultati[i];
-				valid = true;
+		return forSupportSwitchSupport(bcCopy, valid, iter);
+	}
+	
+	private static int forSupportSwitchSupport(int bcCopy, boolean valid, JsonIterator iter) {
+		final int[] valori1 = {'b','t', 'n', 'f'};
+		final int[] valori2 = {'r','"','\\', '/'};
+		final int[] risultati1 = {'\b','\t','\n','\f'};
+		final int[] risultati2 = {'\r','"','\\', '/'};
+		final int n = 4;
+		int result = bcCopy;
+		boolean valid2 = valid;
+
+		for(int i=0; i<n; i++) {
+			if(result == valori1[i]) {
+				result = risultati1[i];
+				valid2 = true;
+			}
+			if(result == valori2[i]) {
+				result = risultati2[i];
+				valid2 = true;
 			}
 		}
-		if(!valid) {
+		
+		if(!valid2) {
 			throw iter.reportError("readStringSlowPath", "invalid escape character: " + bcCopy);
 		}
-		return bcCopy;
+		
+		return result;
 	}
 	
 	private static Map<JsonIterator, Integer> iterImplStreamingSupport(JsonIterator iter, long f, int bc, int u2, int u3, int j) throws IOException{
@@ -779,11 +794,16 @@ class IterImplForStreaming {
 				}
 			}
 			if (!IterImpl.loadMore(iter)) {
-				iter.head = iter.tail;
-				stringa = new String(iter.reusableChars, 0, j);
-				return stringa;
+				return ifSupportReadNumber(iter, stringa, j);
 			}
 		}
+	}
+	
+	public static String ifSupportReadNumber(JsonIterator iter, String stringa, int j) {
+		String result = stringa;
+		iter.head = iter.tail;
+		result = new String(iter.reusableChars, 0, j);
+		return result;
 	}
 
 	static final double readDouble(final JsonIterator iter) throws IOException {
